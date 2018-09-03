@@ -24,7 +24,7 @@
 -- SOFTWARE.
 
 WebBanking {
-    version = 1.0,
+    version = 1.1,
     url = "https://secure.paxum.com/payment/login.php?view=views/login.xsl",
     services = {
         "Paxum"
