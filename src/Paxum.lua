@@ -113,7 +113,7 @@ function RefreshAccount (account, since)
 
     local statementPage = HTML(connection:request(statementsPage:xpath("//form[@name='searchForm']"):submit()))
 
-    local balance = statementPage:xpath("//table[@class='table'][1]/tr[2]/td[7]"):text()
+    local balance = tonumber((statementPage:xpath("//table[@class='table'][1]/tr[2]/td[7]"):text():gsub(",", "")))
 
     local tableRows = statementPage:xpath("//table[@class='table'][1]/tr")
 
@@ -122,8 +122,8 @@ function RefreshAccount (account, since)
     tableRows:each(
         function (i, tableRow)
             local amount = 0
-            local debit = tonumber(tableRow:xpath("td[5]"):text())
-            local credit = tonumber(tableRow:xpath("td[6]"):text())
+            local debit = tonumber((tableRow:xpath("td[5]"):text():gsub(",", "")))
+            local credit = tonumber((tableRow:xpath("td[6]"):text():gsub(",", "")))
 
             if debit ~= nil or credit ~= nil then
                 if debit ~= nil and debit > 0 then
