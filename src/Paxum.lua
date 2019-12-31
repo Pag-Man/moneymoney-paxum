@@ -3,7 +3,7 @@
 
 -- MIT License
 
--- Copyright (c) 2018 Philip Günther (Pag-Man)
+-- Copyright (c) 2020 Philip Günther (Pac-Man)
 
 -- Permission is hereby granted, free of charge, to any person obtaining a copy
 -- of this software and associated documentation files (the "Software"), to deal
@@ -24,8 +24,8 @@
 -- SOFTWARE.
 
 WebBanking {
-    version = 1.1,
-    url = "https://secure.paxum.com/payment/login.php?view=views/login.xsl",
+    version = 2.0,
+    url = "https://secure.paxum.com/payment/api/paymentAPI.php",
     services = {
         "Paxum"
     },
@@ -33,31 +33,55 @@ WebBanking {
 }
 
 local connection = nil
-local mainPage = nil
-local logoutUrl = "https://secure.paxum.com/payment/phrame.php?action=logout"
+local defaultParams = {}
 
 function SupportsBank(protocol, bankCode)
     return protocol == ProtocolWebBanking and bankCode == "Paxum"
 end
 
+function SendApiRequest(params)
+    -- Merge defaultParams with params
+    for key, value in pairs(defaultParams) do
+        params[key] = value
+    end
+
+    -- Build parameter string
+    local postContent = ""
+
+    for key, value in pairs(params) do
+        if postContent ~= "" then
+            postContent = postContent .. "&"
+        end
+
+        postContent = postContent .. key .. "=" .. value
+    end
+
+    local method = "POST"
+    local postContentType = "application/x-www-form-urlencoded"
+
+    local response = connection:request(method, url, postContent, postContentType)
+
+    local xml = HTML(response)
+
+    return xml
+end
+
 function InitializeSession (protocol, bankCode, username, username2, password, username3)
     connection = Connection()
 
-    print("Loading login page: " .. url)
+    -- Define credentials
+    defaultParams["fromEmail"] = username
+    defaultParams["sharedSecret"] = password
 
-    local loginPage = HTML(connection:get(url))
+    -- Login: https://eu.paxum.com/developers/api-documentation/miscellaneous-functions/login/
+    local xml = SendApiRequest({
+        method = "login",
+        key = MM.md5(defaultParams["sharedSecret"] .. defaultParams["fromEmail"]):lower()
+    })
 
-    loginPage:xpath("//input[@name='username']"):attr("value", username)
-    loginPage:xpath("//input[@name='password']"):attr("value", password)
-
-    print("Logging in...")
-
-    mainPage = HTML(connection:request(loginPage:xpath("//form[@name='login']"):submit()))
-
-    -- Check if we are actually logged in
-    local financeOverview = mainPage:xpath("//*[@class='tableDataLabel']")
-    if financeOverview:length() == 0 then
-        return "Login failed. First check your credentials. Then try logging in on the browser, there might be an information page you have to confirm before you can login."
+    -- Check the response code
+    if xml:xpath("//response/responsecode"):text() ~= "00" then
+        return xml:xpath("//response/responsedescription"):text() .. ". Please use the username used during login on the web (example: your_name@domain.com) and the SharedSecret obtained from Merchant Services >> API Settings."
     end
 
     print("Login successful!")
@@ -65,37 +89,29 @@ function InitializeSession (protocol, bankCode, username, username2, password, u
     return nil
 end
 
-
 function ListAccounts (knownAccounts)
-    print("Loading statements page...")
+    -- Balance Inquiry: https://eu.paxum.com/developers/api-documentation/transaction-flow-and-content/balance-inquiry/
+    local xml = SendApiRequest({
+        method = "balanceInquiry",
+        key = MM.md5(defaultParams["sharedSecret"]):lower()
+    })
 
-    local statementsPage = HTML(connection:get("https://secure.paxum.com/payment/journalEntryItemList.php?view=views/journalEntryItemList.xsl"))
-
-    local accountsSelect = statementsPage:xpath("//select[@name='accountId']")
+    -- Check the response code
+    if xml:xpath("//response/responsecode"):text() ~= "00" then
+        return xml:xpath("//response/responsedescription"):text() .. "."
+    end
 
     local accounts = {}
 
-    accountsSelect:children():each(
-        function (i, accountsOption)
-            local accountNumber = accountsOption:xpath("@value"):text()
+    local xmlAccounts = xml:xpath("//response/accounts"):children()
 
-            if accountNumber ~= "" then
-                local currency = 'USD'
-                local i = 1
-                for match in string.gmatch(accountsOption:text(), "%S+") do
-                    if i == 1 then
-                        currency = match
-                    end
-
-                    i = i + 1
-                end
-
-                table.insert(accounts, {
-                    name = "Paxum " .. currency,
-                    accountNumber = accountNumber,
-                    currency = currency
-                })
-            end
+    xmlAccounts:each(
+        function (index, xmlAccount)
+            table.insert(accounts, {
+                name = xmlAccount:xpath("accountname"):text(),
+                accountNumber = xmlAccount:xpath("accountid"):text(),
+                currency = xmlAccount:xpath("currency"):text()
+            })
         end
     )
 
@@ -103,51 +119,60 @@ function ListAccounts (knownAccounts)
 end
 
 function RefreshAccount (account, since)
-    print("Loading initial statements page...")
+    -- Balance Inquiry: https://eu.paxum.com/developers/api-documentation/transaction-flow-and-content/balance-inquiry/
+    local xml = SendApiRequest({
+        method = "balanceInquiry",
+        accountId = account.accountNumber,
+        key = MM.md5(defaultParams["sharedSecret"] .. account.accountNumber):lower()
+    })
 
-    local statementsPage = HTML(connection:get("https://secure.paxum.com/payment/journalEntryItemList.php?view=views/journalEntryItemList.xsl"))
+    -- Check the response code
+    if xml:xpath("//response/responsecode"):text() ~= "00" then
+        return xml:xpath("//response/responsedescription"):text() .. "."
+    end
 
-    statementsPage:xpath("//select[@name='accountId']"):select(account.accountNumber)
+    local balance = xml:xpath("//response/accounts/account/balance"):text()
 
-    print("Loading the statement page for the account...")
+    -- Transaction History: https://eu.paxum.com/developers/api-documentation/transaction-flow-and-content/transaction-history/
+    local fromDate = os.date('%Y-%m-%d', since)
+    local toDate = os.date('%Y-%m-%d', os.time())
+    local pageSize = 100
+    local pageNumber = 1
 
-    local statementPage = HTML(connection:request(statementsPage:xpath("//form[@name='searchForm']"):submit()))
+    local xml = SendApiRequest({
+        method = "transactionHistory",
+        accountId = account.accountNumber,
+        fromDate = fromDate,
+        toDate = toDate,
+        pageSize = pageSize,
+        pageNumber = pageNumber,
+        key = MM.md5(defaultParams["sharedSecret"] .. account.accountNumber .. fromDate .. toDate .. pageSize .. pageNumber):lower()
+    })
 
-    local balance = tonumber((statementPage:xpath("//table[@class='table'][1]/tr[2]/td[7]"):text():gsub(",", "")))
-
-    local tableRows = statementPage:xpath("//table[@class='table'][1]/tr")
+    -- Check the response code
+    if xml:xpath("//response/responsecode"):text() ~= "00" then
+        return xml:xpath("//response/responsedescription"):text() .. "."
+    end
 
     local transactions = {}
 
-    tableRows:each(
-        function (i, tableRow)
-            local amount = 0
-            local debit = tonumber((tableRow:xpath("td[5]"):text():gsub(",", "")))
-            local credit = tonumber((tableRow:xpath("td[6]"):text():gsub(",", "")))
+    local xmlTransactions = xml:xpath("//response/transactions"):children()
 
-            if debit ~= nil or credit ~= nil then
-                if debit ~= nil and debit > 0 then
-                    amount = -debit
-                end
+    xmlTransactions:each(
+        function (index, xmlTransaction)
+            local year, month, day = string.match(xmlTransaction:xpath("transactiondate"):text(), "(%d%d%d%d).(%d%d).(%d%d)")
 
-                if credit ~= nil and credit > 0 then
-                    amount = credit
-                end
-
-                local year, month, day = string.match(tableRow:xpath("td[2]"):text(), "(%d%d%d%d).(%d%d).(%d%d)")
-
-                table.insert(transactions, {
-                    transactionCode = tableRow:xpath("td[1]"):text(),
-                    bookingDate = os.time({
-                        year = tonumber(year),
-                        month = tonumber(month),
-                        day = tonumber(day)
-                    }),
-                    purpose = tableRow:xpath("td[3]"):text(),
-                    bookingText = tableRow:xpath("td[4]"):text(),
-                    amount = amount
-                })
-            end
+            table.insert(transactions, {
+                transactionCode = xmlTransaction:xpath("transactionid"):text(),
+                bookingDate = os.time({
+                    year = tonumber(year),
+                    month = tonumber(month),
+                    day = tonumber(day)
+                }),
+                purpose = xmlTransaction:xpath("description"):text(),
+                amount = xmlTransaction:xpath("amount"):text(),
+                currency = xmlTransaction:xpath("currency"):text()
+            })
         end
     )
 
@@ -158,7 +183,5 @@ function RefreshAccount (account, since)
 end
 
 function EndSession()
-    print("Logging out...")
-
-    connection:get(logoutUrl)
+    return nil
 end
